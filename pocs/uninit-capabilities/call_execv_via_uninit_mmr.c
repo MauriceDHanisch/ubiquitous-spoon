@@ -14,11 +14,11 @@ int main(void) {
     uintptr_t execv_addr = 0x4026d90d; // This needs to be found and depends on the program!
     uintptr_t _start_base = 0x100000;
 
-    char *str[MAX_PTRS];
+    void *ptrs[MAX_PTRS];
     void *cap = NULL;
 
     for (int i = 0; i < MAX_PTRS; i++) {
-        cap = str[i];
+        cap = ptrs[i];
         uintptr_t base = cheri_base_get(cap);
         uintptr_t end = base + cheri_length_get(cap);
 
