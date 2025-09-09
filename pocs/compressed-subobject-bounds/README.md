@@ -57,6 +57,15 @@ uint64_t getMorelloRequiredAlignment(uint64_t length) {
   - ~1 MB   → alignment of 512 bytes  
   - Larger allocations → increasingly coarse rounding
 
+#### Measuring worst-case inaccuracy locally
+
+- You can measure the required alignment and worst-case bounds inaccuracy for a  
+  given allocation size using the helper binary:  
+  - `make run BIN=bounds_misalignment`  
+  - or `make run-bounds_misalignment`  
+  When prompted, enter the size in bytes (decimal or `0xHEX`). The tool will  
+  print `required_alignment` and `worst_case_inaccuracy_bytes` for that size.
+
 This imprecision means bounds may extend beyond the intended allocation, covering  
 adjacent memory.
 
