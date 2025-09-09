@@ -3,7 +3,7 @@
 ## Introduction
 
 CHERI capabilities provide spatial memory safety by enforcing bounds on pointers.  
-On Morello (128-bit capabilities), bounds are **compressed**, which introduces a  
+On Morello (128-bit capabilities), bounds are **compressed** [1], which introduces a  
 precision trade-off. While this design allows efficient representation of bounds,  
 it also leads to exploitable situations in the context of **subobject bounds**.  
 This document describes the mechanism, examples of imprecision, why fixing it is  
@@ -18,7 +18,13 @@ most **15 bits** for representing bounds precisely. For allocations smaller than
 a threshold, bounds are exact. Beyond that, they are imprecise and rounded, in a  
 manner similar to floating-point exponent/mantissa encoding.
 
-The LLVM implementation of the alignment requirement is shown below:
+On the heap and stack, compilers and allocators typically insert sufficient  
+spacing between adjacent objects so that bounds rounding does not cause a  
+capability for one allocation to overlap the next allocation. This ensures  
+that imprecision does not permit cross-object accesses between independently  
+allocated heap or stack objects.  
+
+The LLVM implementation of the alignment requirement is shown below [2]:
 ```cpp
 uint64_t getMorelloRequiredAlignment(uint64_t length) {
   // FIXME: In the specification l is a 65-bit value to permit the encoding
@@ -44,11 +50,11 @@ uint64_t getMorelloRequiredAlignment(uint64_t length) {
 
 ### Precision Thresholds
 
-- **≤ 32 KB (2^15)**: Bounds are exact.  
-- **> 32 KB**: Bounds are rounded to alignments determined by exponent `E`.  
+- **< 16 KiB**: Bounds are exact.  
+- **> 16 KiB**: Bounds are rounded to alignments determined by exponent `E`.  
 - Alignment grows with size, for example:
-  - ~1 MB → alignment of 64 bytes  
-  - ~1 GB → alignment of 512 KB  
+  - ~32 KiB → alignment of 16 bytes  
+  - ~1 MB   → alignment of 512 bytes  
   - Larger allocations → increasingly coarse rounding
 
 This imprecision means bounds may extend beyond the intended allocation, covering  
@@ -58,21 +64,45 @@ adjacent memory.
 
 ## Subobject Bounds
 
-### Default Behavior
+### Why structs are different
 
-By default, struct fields inherit the bounds of the enclosing struct. This means  
-CHERI’s protections do **not** prevent accesses between adjacent fields inside a  
-struct. Out-of-bounds reads or writes within the struct can therefore corrupt  
-other fields.
+For structs, the default is that each field inherits the bounds of the entire  
+enclosing struct. This preserves long-standing C/C++ layout and access patterns  
+that many data structures rely on, such as intrusive linked lists and other  
+container patterns where code computes addresses of neighboring fields or uses  
+`offsetof`-based arithmetic across members. With whole-struct bounds, these  
+patterns remain compatible across compilation units and libraries [4].  
 
-### `cheri-bounds=subobject-safe`
+A consequence is that CHERI does **not** prevent accesses between adjacent  
+fields inside a struct by default. An out-of-bounds access within the struct  
+can therefore reach other fields.
 
-This compiler flag narrows bounds to the specific field:
+### Enabling per-field bounds: `cheri-bounds=subobject-safe`
 
-- Each struct member has its own capability bounds.  
-- However, **no padding is inserted** between fields to guarantee precision.  
-- Large fields remain subject to compression imprecision, so bounds can still  
-  overlap with adjacent fields.
+Enabling this compiler flag narrows bounds to individual fields [4]:
+
+- Each struct member receives its own capability bounds.  
+- However, the compiler does not insert padding between fields to ensure those  
+  bounds remain precise under compressed-bounds rounding.  
+- Large members therefore remain subject to imprecision, and their bounds may  
+  still overlap adjacent fields.
+
+### Why not add padding inside structs?
+
+Padding large members to preserve precision would change `sizeof(struct)` and  
+`offsetof(member)`, breaking the Application Binary Interface (ABI). That means:  
+
+- Code compiled with and without the flag would disagree on struct size and  
+  member offsets.  
+- Cross-module and system interfaces (e.g., kernel↔user, library boundaries,  
+  device-driver ABIs) would misinterpret the same memory.  
+- Stable on-disk formats or wire protocols that embed structs would no longer  
+  match.  
+
+Because many projects must interoperate across mixed toolchains and compiled  
+artifacts, silently changing struct layout is not acceptable. As a result,  
+subobject bounds are applied without layout changes; they are effective when  
+precision allows, but cannot be guaranteed for all members.
 
 ---
 
@@ -86,7 +116,7 @@ Imprecision can be exploited via:
 - **Overread attacks**: Reading from one field into a neighboring one, leaking data.  
 
 This is particularly dangerous if developers assume that enabling  
-`subobject-safe` guarantees exact field isolation.
+`subobject-safe` guarantees exact field isolation [3, 4].
 
 ### Practical Impact
 
@@ -99,54 +129,52 @@ This is particularly dangerous if developers assume that enabling
 
 ## Why This Is Hard to Fix
 
-Fixing subobject bounds precision is not straightforward:
+Fixing subobject bounds precision while maintaining compatibility is difficult:
 
-- **ABI Compatibility**: Inserting padding or changing alignment in structs would  
-  break binary interfaces between code compiled with and without subobject bounds.  
-  To avoid ABI divergence, CHERI currently treats subobject bounds as  
-  *opportunistic* — they are enforced when possible, but not guaranteed.
-
-- **Compiler Trade-offs**: A stricter compiler could add padding or reject  
-  imprecise structures, but this would cause widespread compatibility issues,  
-  especially for large data structures (e.g., metadata + large buffers).
-
-- **Spurious Faults**: Using exact bounds instructions (e.g., `setboundsexact`)  
-  could cause false faults in normal code unless carefully tested. A complete  
-  solution would require extensive test suites.
-
-- **Real-World Structures**: Many problematic cases are precisely the ones least  
-  suited to automated padding (e.g., “128 bytes metadata + 512 KB buffer”).  
-  In such cases, compiler errors or warnings are preferable to silent imprecision.
+- **ABI compatibility is paramount**: As explained above, adding intra-struct  
+  padding changes sizes and offsets, breaking interoperability across binaries  
+  and interfaces. This rules out the most direct fix.  
+- **Compiler trade-offs**: A stricter mode could add padding or reject affected  
+  structs, but would fragment the ecosystem and break common layouts (e.g.,  
+  small metadata followed by a large in-struct buffer).  
+- **Spurious faults risk**: Forcing exact bounds (e.g., via `setboundsexact`)  
+  can fault benign programs unless thoroughly validated. Achieving correctness  
+  at scale requires extensive testing.  
+- **Prevalent real-world patterns**: Many vulnerable layouts are exactly those  
+  that resist automatic fixes (e.g., “metadata + large tail buffer” within a  
+  single struct). In these cases, surfacing diagnostics is often the safest  
+  approach.
 
 ---
 
 ## Mitigations
 
-1. **Heap/Stack Padding**  
-   - For heap and stack allocations, CHERI already adds padding to preserve bounds  
-     precision.  
+1. **Allocation-domain padding (heap/stack)**  
+   - Compilers/allocators insert spacing so rounded bounds for one allocation do  
+     not overlap the next. This reduces cross-object risks outside of structs.  
 
-2. **Compiler Warnings**  
-   - Warn when struct fields have imprecise bounds.  
-   - Encourage developers to restructure affected data structures.  
+2. **Struct design guidance**  
+   - Separate large buffers from metadata (allocate buffers independently).  
+   - Use flexible array members or place large arrays last to reduce overlap risk.  
+   - Where you control the ABI, add explicit padding and freeze the new layout.  
 
-3. **Static Analysis**  
-   - Tools (DWARF analysis, LLVM passes) can detect imprecise struct members.  
-   - Helps identify risky cases in large codebases such as CheriBSD.  
+3. **Diagnostics**  
+   - Compiler warnings for imprecise member bounds.  
+   - Static analysis (e.g., DWARF/LLVM passes) to flag risky layouts in large  
+     codebases such as CheriBSD [3, 4].  
 
-4. **Policy Changes**  
-   - There is ongoing discussion about enabling limited subobject bounds by default.  
-   - This has measurable security benefits, as demonstrated in kernel vulnerability  
-     studies, though it cannot eliminate all risks.
+4. **Policy and defaults**  
+   - Explore enabling limited subobject bounds by default where safe.  
+   - Document that subobject bounds are opportunistic under compression and  
+     cannot guarantee exact per-field isolation for large members.
 
 ---
 
 ## References
 
-- Watson et al., *CHERI: A Hybrid Capability-System Architecture for Scalable Software Compartmentalization*, IEEE S&P 2015.  
-- Richardson, *Exploring C/C++ Memory Safety with CHERI Subobject Bounds*, PhD Thesis, University of Cambridge, 2020.  
-- Morello Architecture Specification, Arm Ltd., 2021.  
-- LLVM Implementation: [llvm/lib/Support/Morello.cpp](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Support/Morello.cpp)  
-- CHERI C/C++ Programming Guide: [CTSRD-CHERI/cheri-c-programming](https://github.com/CTSRD-CHERI/cheri-c-programming)  
+1. Arm Ltd., *Arm Architecture Reference Manual for A-profile Architecture (Arm ARM), DDI 0606* — `https://developer.arm.com/documentation/ddi0606/latest/`  
+2. LLVM Project, *Morello bounds alignment implementation* — `https://github.com/llvm/llvm-project/blob/main/llvm/lib/Support/Morello.cpp`  
+3. Alexander Richardson, *Complete spatial safety for C and C++ using CHERI capabilities*, University of Cambridge, Technical Report UCAM-CL-TR-949, 2020 — `https://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-949.pdf`  
+4. CTSRD-CHERI, *CHERI C/C++ Programming Guide* — `https://github.com/CTSRD-CHERI/cheri-c-programming`  
 
 ---
