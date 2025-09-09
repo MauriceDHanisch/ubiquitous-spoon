@@ -15,6 +15,11 @@ UTILS_DIR  = utils
 UTILS_SRC  = $(UTILS_DIR)/utils.c
 UTILS_INC  = -I$(UTILS_DIR)
 
+# Standalone utilities
+BM_DIR     = $(UTILS_DIR)
+BM_BIN     = bounds_misalignment
+BM_SRC     = $(BM_DIR)/bounds_misalignment.c
+
 # PoC directories and targets
 POC_DIR = pocs
 
@@ -60,7 +65,8 @@ ALL_BINS = \
   $(BIN_DIR)/$(JEM_SHADOW_BIN) \
   $(BIN_DIR)/$(JEM_UNPAINT_BIN) \
   $(BIN_DIR)/$(DLM_BIN) \
-  $(BIN_DIR)/$(UIC_BIN)
+  $(BIN_DIR)/$(UIC_BIN) \
+  $(BIN_DIR)/$(BM_BIN)
 
 # Short names (for alias & run targets)
 BIN_NAMES = \
@@ -69,7 +75,8 @@ BIN_NAMES = \
   $(JEM_SHADOW_BIN) \
   $(JEM_UNPAINT_BIN) \
   $(DLM_BIN) \
-  $(UIC_BIN)
+  $(UIC_BIN) \
+  $(BM_BIN)
 
 .PHONY: all list clean run
 all: $(ALL_BINS)
@@ -112,6 +119,10 @@ $(BIN_DIR)/$(DLM_BIN): $(DLM_SRC)
 $(BIN_DIR)/$(UIC_BIN): $(UIC_SRC)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS_COMMON) $(UIC_CFLAGS) -o $@ $(UIC_SRC)
+
+$(BIN_DIR)/$(BM_BIN): $(BM_SRC)
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS_COMMON) -o $@ $(BM_SRC)
 
 # --- Convenience aliases: build by short name; run by short name ---
 .for b in $(BIN_NAMES)
