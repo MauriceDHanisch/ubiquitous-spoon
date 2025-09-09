@@ -149,34 +149,7 @@ Fixing subobject bounds precision while maintaining compatibility is difficult:
 - **Spurious faults risk**: Forcing exact bounds (e.g., via `setboundsexact`)  
   can fault benign programs unless thoroughly validated. Achieving correctness  
   at scale requires extensive testing.  
-- **Prevalent real-world patterns**: Many vulnerable layouts are exactly those  
-  that resist automatic fixes (e.g., “metadata + large tail buffer” within a  
-  single struct). In these cases, surfacing diagnostics is often the safest  
-  approach.
-
----
-
-## Mitigations
-
-1. **Allocation-domain padding (heap/stack)**  
-   - Compilers/allocators insert spacing so rounded bounds for one allocation do  
-     not overlap the next. This reduces cross-object risks outside of structs.  
-
-2. **Struct design guidance**  
-   - Separate large buffers from metadata (allocate buffers independently).  
-   - Use flexible array members or place large arrays last to reduce overlap risk.  
-   - Where you control the ABI, add explicit padding and freeze the new layout.  
-
-3. **Diagnostics**  
-   - Compiler warnings for imprecise member bounds.  
-   - Static analysis (e.g., DWARF/LLVM passes) to flag risky layouts in large  
-     codebases such as CheriBSD [3, 4].  
-
-4. **Policy and defaults**  
-   - Explore enabling limited subobject bounds by default where safe.  
-   - Document that subobject bounds are opportunistic under compression and  
-     cannot guarantee exact per-field isolation for large members.
-
+  
 ---
 
 ## References
